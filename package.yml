@@ -1,0 +1,207 @@
+name: ast-grep
+title: ast-grep
+summary: Searches, lints and rewrites code with patterns that match its syntax tree, and runs the rules a project keeps in sgconfig.yml.
+homepage: https://ast-grep.github.io/
+# ast-grep is MIT, and so are most of the crates compiled into it; the label
+# takes MIT wherever a crate offers it. codespan-reporting, similar,
+# sync_wrapper, tree-sitter-elixir and tree-sitter-hcl are Apache-2.0 only,
+# encoding_rs includes WHATWG data under BSD-3-Clause, libloading is ISC,
+# borrow-or-share is MIT-0 and option-ext is MPL-2.0. The tree-sitter crate
+# compiles three headers from ICU, under the license file that ships with
+# them: the Unicode license of ICU 58 and later (Unicode-DFS-2016), and the
+# ICU License for their IBM code from ICU 57 and earlier. The build stops when
+# a crate linked into ast-grep has a license that this label does not cover
+# (scripts/cargo-licenses.py reads the line). The Rust standard library and
+# the crates it uses are linked in too: MIT or a choice that includes it, with
+# compiler-builtins also under Apache-2.0 WITH LLVM-exception and the Unicode
+# data tables in core under Unicode-3.0. Crates used only while building, such
+# as Inflector (BSD-2-Clause), are not part of the binary and are left out.
+license: MIT AND Apache-2.0 AND BSD-3-Clause AND ISC AND MIT-0 AND MPL-2.0 AND Unicode-3.0 AND Unicode-DFS-2016 AND ICU AND Apache-2.0 WITH LLVM-exception
+upstream:
+  source: github-release
+  repository: ast-grep/ast-grep
+  tag-pattern: '^(\d+\.\d+\.\d+)$'
+  version-template: '{1}'
+  versioning: semver
+  version: 0.51.0
+  # The release tag is built with its Cargo.lock, and cargo checks every crate
+  # it downloads against the checksum there.
+  git:
+    url: https://github.com/ast-grep/ast-grep.git
+    tag: '{version}'
+    commit: 48b54b3120b70fa9e8cbb40a03bf3bfebe6bf50a
+  extra-artifacts:
+    # The Rust release manifest, signed with the Rust release key in
+    # keys/rust.gpg. scripts/rust-toolchain.sh installs rustc, cargo,
+    # rust-std and rust-src from the archives it lists, each checked against
+    # the SHA-256 the manifest gives. The reconciler moves version and sha256
+    # to each new stable release once it is 7 days old.
+    rust-toolchain:
+      version: 1.99.1
+      url: https://static.rust-lang.org/dist/channel-rust-{version}.toml
+      checksums: {url: 'https://static.rust-lang.org/dist/channel-rust-{version}.toml.sha256', algorithm: sha256}
+      signature: https://static.rust-lang.org/dist/channel-rust-{version}.toml.asc
+      sha256: fb152be80975c194aa5fc684b2aec3a6e14e2b855efe2faa4e5f8ae6e590f463
+      track:
+        source: html-index
+        url: https://static.rust-lang.org/dist/channel-rust-stable.toml
+        pattern: '^url = "https://static\.rust-lang\.org/dist/(?P<date>\d{4}-\d{2}-\d{2})/rustc-(?P<version>\d+\.\d+\.\d+)-x86_64-unknown-linux-gnu\.tar\.gz"$'
+        versioning: semver
+        cooldown: 7d
+        skip: []
+    # Built from its crate and used only in the build stage. It stores the
+    # list of crates in the ast-grep binary, where SBOM tools and image
+    # scanners read it. Update version and sha256 together, with the checksum
+    # from the crates.io index.
+    cargo-auditable:
+      version: 0.7.7
+      url: https://static.crates.io/crates/cargo-auditable/cargo-auditable-{version}.crate
+      sha256: ccdd489bc94d1338cd04389a842e00661300331ec915fb376b4810ef7d480b5d
+image:
+  entrypoint: [ast-grep]
+  cmd: [--help]
+test:
+  - |
+    ast-grep --version > version.txt
+    test "$(cat version.txt)" = "ast-grep $VERSION" \
+      || { echo "expected 'ast-grep $VERSION', got '$(cat version.txt)'" >&2; exit 1; }
+    # sg, upstream's deprecated second name for ast-grep, is not installed.
+    if [ -e /usr/local/bin/sg ]; then echo "/usr/local/bin/sg should not be in the image" >&2; exit 1; fi
+  - |
+    # ast-grep is linked against the C library of the image it was built in,
+    # and its .dep-v0 section lists the crates it was built from. GNU ld puts
+    # the build ID right before the loader's path, and tr may keep its last
+    # byte, so the path is matched anywhere in a word.
+    head -c 4096 /usr/local/bin/ast-grep | LC_ALL=C tr -c 'A-Za-z0-9_./-' '\n' | grep -oE '/lib(64)?/ld-[A-Za-z0-9_.-]+' > loader.txt \
+      || { echo "ast-grep names no dynamic loader" >&2; exit 1; }
+    loader=$(head -n 1 loader.txt)
+    test -e "$loader" || { echo "ast-grep needs $loader, which is not in the image" >&2; exit 1; }
+    LC_ALL=C grep -Fq .dep-v0 /usr/local/bin/ast-grep || { echo "ast-grep has no .dep-v0 section" >&2; exit 1; }
+  - |
+    # A pattern search with JSON output: $A matches one node, so the call
+    # with two arguments does not match.
+    mkdir search
+    printf 'console.log(a)\nfoo(b)\nconsole.log(c, d)\n' > search/app.js
+    ast-grep run -p 'console.log($A)' -l js --json=compact search/app.js > search.json \
+      || { echo "expected a match in search/app.js, got:" >&2; cat search.json >&2; exit 1; }
+    n=$(grep -o '"file":' search.json | wc -l | tr -d ' ')
+    test "$n" = 1 || { echo "expected 1 match, got $n:" >&2; cat search.json >&2; exit 1; }
+    { grep -Fq '"text":"console.log(a)"' search.json && grep -Fq '"single":{"A":{"text":"a"' search.json; } \
+      || { echo "expected console.log(a) with A = a, got:" >&2; cat search.json >&2; exit 1; }
+    # Without a match ast-grep prints an empty array and exits with 1.
+    status=0
+    ast-grep run -p 'nomatch($X)' -l js --json=compact search/app.js > nomatch.json || status=$?
+    { test "$status" = 1 && test "$(cat nomatch.json)" = '[]'; } \
+      || { echo "expected [] and exit status 1, got $status:" >&2; cat nomatch.json >&2; exit 1; }
+    # Code on standard input.
+    printf 'x = 1\nprint(x)\n' | ast-grep run -p 'print($A)' -l py --stdin --json=compact > stdin.json
+    grep -Fq '"text":"print(x)"' stdin.json || { echo "expected print(x), got:" >&2; cat stdin.json >&2; exit 1; }
+  - |
+    # --update-all (-U) writes the rewrite into the file.
+    mkdir rewrite
+    printf 'var x = 1;\nconsole.log(x);\n' > rewrite/app.js
+    ast-grep run -p 'var $A = $B;' -r 'let $A = $B;' -l js -U rewrite/app.js > rewrite.log \
+      || { echo "expected a match in rewrite/app.js, got:" >&2; cat rewrite.log >&2; exit 1; }
+    printf 'let x = 1;\nconsole.log(x);\n' > rewrite/want.js
+    cmp rewrite/want.js rewrite/app.js || { echo "rewrite/app.js was not rewritten:" >&2; cat rewrite/app.js >&2; exit 1; }
+  - |
+    # A project with sgconfig.yml, a rule and a rule test. scan exits with 1
+    # when a rule of severity error matches, and with 0 when none does.
+    mkdir -p project/rules project/rule-tests project/src
+    cd project || exit 1
+    printf 'ruleDirs:\n  - rules\ntestConfigs:\n  - testDir: rule-tests\n' > sgconfig.yml
+    printf 'id: no-console\nmessage: Use the logger\nseverity: error\nlanguage: JavaScript\nrule:\n  pattern: console.log($$$ARGS)\n' > rules/no-console.yml
+    printf 'logger.info(1);\nconsole.log(2, 3);\n' > src/app.js
+    status=0
+    ast-grep scan > scan.txt 2>&1 || status=$?
+    { test "$status" = 1 && grep -Fq no-console scan.txt; } \
+      || { echo "expected no-console and exit status 1, got $status:" >&2; cat scan.txt >&2; exit 1; }
+    status=0
+    ast-grep scan --json=compact > scan.json 2> scan.err || status=$?
+    { test "$status" = 1 && grep -Fq '"ruleId":"no-console"' scan.json && grep -Fq '"text":"console.log(2, 3)' scan.json; } \
+      || { echo "expected a no-console match as JSON, got $status:" >&2; cat scan.json scan.err >&2; exit 1; }
+    status=0
+    ast-grep scan --format sarif > scan.sarif 2> scan.err || status=$?
+    { test "$status" = 1 && grep -Fq '"ruleId": "no-console"' scan.sarif; } \
+      || { echo "expected a no-console result in SARIF, got $status:" >&2; cat scan.sarif scan.err >&2; exit 1; }
+    printf 'id: no-console\nvalid:\n  - logger.info(1)\ninvalid:\n  - console.log(1)\n' > rule-tests/no-console-test.yml
+    ast-grep test --skip-snapshot-tests > test.txt 2>&1 || { echo "the rule test failed:" >&2; cat test.txt >&2; exit 1; }
+    printf 'id: no-console\nvalid:\n  - console.log(1)\ninvalid:\n  - logger.info(1)\n' > rule-tests/no-console-test.yml
+    status=0
+    ast-grep test --skip-snapshot-tests > wrong.txt 2>&1 || status=$?
+    test "$status" != 0 || { echo "a wrong rule test passed:" >&2; cat wrong.txt >&2; exit 1; }
+    printf 'logger.info(1);\n' > src/app.js
+    ast-grep scan > clean.txt 2>&1 || { echo "expected no findings in src/app.js, got:" >&2; cat clean.txt >&2; exit 1; }
+  - |
+    # Every built-in language is compiled in. Most pattern and code pairs come
+    # from upstream's tests; MATCH is the start of the matched text. The
+    # pattern is attached with = because a separate one that starts with "-"
+    # (the markdown list item) is read as an option.
+    mkdir langs
+    # check LANG EXT PATTERN CODE MATCH
+    check() {
+      printf '%s\n' "$4" > "langs/code.$2"
+      ast-grep run --pattern="$3" -l "$1" --json=compact "langs/code.$2" > "langs/$2.json" \
+        || { echo "$1: '$3' does not match '$4':" >&2; cat "langs/$2.json" >&2; exit 1; }
+      grep -Fq "\"text\":\"$5" "langs/$2.json" \
+        || { echo "$1: expected a match of $5, got:" >&2; cat "langs/$2.json" >&2; exit 1; }
+    }
+    check bash sh 'echo $A' 'echo test' 'echo test'
+    check cpp cpp '$A->b()' 'expr->b()' 'expr->b()'
+    check csharp cs 'int $A = 0;' 'int nint = 0;' 'int nint = 0'
+    check css css '.a { color: $COLOR; }' '.a { color: red; }' '.a { color: red'
+    check dart dart 'class $A {}' 'class Foo {}' 'class Foo'
+    check elixir ex 'IO.puts($A)' 'IO.puts(123)' 'IO.puts(123)'
+    check go go 'print($A)' 'print(123)' 'print(123)'
+    check haskell hs 'return $A' 'return 3' 'return 3'
+    check hcl hcl '$A = $B' 'foo = "bar"' 'foo = '
+    check html html '<$TAG>' '<input>' '<input>'
+    check java java 'System.out.println($A);' 'class A { void f() { System.out.println(1); } }' 'System.out.println(1)'
+    check javascript js 'console.log($A)' 'console.log(123)' 'console.log(123)'
+    check json json '[$A]' '[123]' '[123]'
+    check kotlin kt 'println($A)' 'println(123)' 'println(123)'
+    check lua lua 'print($S)' "print('Hello World')" "print('Hello World')"
+    check markdown md '- $ITEM' '- item' '- item'
+    check nix nix '$A + $B' '1 + 2' '1 + 2'
+    check php php '123' '123' '123'
+    check python py 'print($A)' 'print(123)' 'print(123)'
+    check ruby rb 'Foo::$METHOD()' 'Foo::bar()' 'Foo::bar()'
+    check rust rs 'Some($A)' 'fn test() { Some(123) }' 'Some(123)'
+    check scala scala 'println($A)' 'println(123)' 'println(123)'
+    check solidity sol 'pragma solidity 0.8.28;' 'pragma solidity 0.8.28;' 'pragma solidity 0.8.28'
+    check swift swift 'fun($A)' 'fun(123)' 'fun(123)'
+    check typescript ts 'console.log($A)' 'console.log(123)' 'console.log(123)'
+    check tsx tsx 'console.log($A)' 'console.log(123)' 'console.log(123)'
+    check yaml yaml 'foo: $BAR' 'foo: 123' 'foo: 123'
+    check zig zig '$A + $B' 'a + b' 'a + b'
+    # tree-sitter-c reads a lone call pattern as a type, so C takes the call
+    # out of a statement with --selector, as upstream's C catalog does.
+    printf 'int main(void) {\n    int b = test(2);\n}\n' > langs/code.c
+    ast-grep run -p '$M($$$);' --selector call_expression -l c --json=compact langs/code.c > langs/c.json \
+      || { echo "c: no call found:" >&2; cat langs/c.json >&2; exit 1; }
+    grep -Fq '"text":"test(2)' langs/c.json || { echo "c: expected a match of test(2), got:" >&2; cat langs/c.json >&2; exit 1; }
+  - |
+    # Rules given on the command line, the outline of a file, and shell
+    # completions.
+    printf 'console.log(123)\n' > inline.ts
+    status=0
+    ast-grep scan --inline-rules '{id: inline, language: ts, rule: {pattern: console.log($A)}}' --json inline.ts > inline.json || status=$?
+    { test "$status" = 0 && grep -Fq '"text": "console.log(123)"' inline.json; } \
+      || { echo "expected a match of the inline rule, got $status:" >&2; cat inline.json >&2; exit 1; }
+    printf '# Introduction\n\n## Usage\n' > guide.md
+    ast-grep outline guide.md --json=compact > outline.json
+    { grep -Fq '"name":"Introduction"' outline.json && grep -Fq '"name":"Usage"' outline.json; } \
+      || { echo "expected the two headings, got:" >&2; cat outline.json >&2; exit 1; }
+    ast-grep completions bash > completions.bash
+    grep -Fq ast-grep completions.bash || { echo "no bash completions for ast-grep" >&2; exit 1; }
+examples:
+  - title: Scan the project with the rules that sgconfig.yml names
+    command: docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" ghcr.io/randomcontainers/ast-grep scan
+  - title: Find every console.log call in the TypeScript files under src/
+    command: docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" ghcr.io/randomcontainers/ast-grep run -p 'console.log($$$ARGS)' -l ts src/
+  - title: Rewrite var declarations to let in place
+    command: docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" ghcr.io/randomcontainers/ast-grep run -p 'var $A = $B;' -r 'let $A = $B;' -l js -U src/
+  - title: Write the scan results as SARIF for code scanning
+    command: docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" ghcr.io/randomcontainers/ast-grep scan --format sarif > ast-grep.sarif
+  - title: Run the rule tests of the project
+    command: docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" ghcr.io/randomcontainers/ast-grep test --skip-snapshot-tests
