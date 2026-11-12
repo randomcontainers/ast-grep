@@ -23,13 +23,13 @@ upstream:
   tag-pattern: '^(\d+\.\d+\.\d+)$'
   version-template: '{1}'
   versioning: semver
-  version: 0.51.1
+  version: 0.51.2
   # The release tag is built with its Cargo.lock, and cargo checks every crate
   # it downloads against the checksum there.
   git:
     url: https://github.com/ast-grep/ast-grep.git
     tag: '{version}'
-    commit: 5a204b1ef3facef94de125d990dddc7cf90011c0
+    commit: 627f854bc649ddf3eacdaabb5e61c76317da6260
   extra-artifacts:
     # The Rust release manifest, signed with the Rust release key in
     # keys/rust.gpg. scripts/rust-toolchain.sh installs rustc, cargo,
